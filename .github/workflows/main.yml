@@ -1,0 +1,99 @@
+name: W-Bot07
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */5 * * *"
+
+concurrency:
+  group: w-bot07
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+
+    steps:
+      - name: Wait for previous run to save its session
+        run: sleep 25
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Create session helper script
+        run: |
+          cat > "$RUNNER_TEMP/save_session.sh" << 'EOF'
+          #!/usr/bin/env bash
+          cd "$GITHUB_WORKSPACE" || exit 0
+          if [ ! -f session_bot/creds.json ]; then
+            echo "No creds.json yet - skipping session save."
+            exit 0
+          fi
+          TMP="$(mktemp -d)"
+          cp -a session_bot/. "$TMP/"
+          cd "$TMP" || exit 0
+          git init -q -b session
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "session $(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 0
+          if git push -f -q "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" session:session; then
+            echo "Session saved."
+          else
+            echo "Session push failed."
+          fi
+          EOF
+          chmod +x "$RUNNER_TEMP/save_session.sh"
+
+      - name: Restore session from session branch
+        run: |
+          rm -rf session_bot
+          mkdir -p session_bot
+          if git ls-remote --exit-code --heads origin session > /dev/null 2>&1; then
+            git fetch --depth=1 origin session
+            git archive FETCH_HEAD | tar -x -C session_bot
+            echo "Session restored."
+          else
+            echo "No session branch found - starting with an empty session folder."
+          fi
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BOT_NUMBER: ${{ secrets.BOT_NUMBER }}
+          OWNER_NUMBER: ${{ secrets.OWNER_NUMBER }}
+          USER_NAME: Rohit
+          BOT_TIMEZONE: Asia/Kolkata
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          (
+            while true; do
+              sleep 240
+              if [ -f session_bot/creds.json ]; then
+                bash "$RUNNER_TEMP/save_session.sh" || true
+              fi
+            done
+          ) &
+          SAVER_PID=$!
+          timeout 335m node index.js || true
+          kill "$SAVER_PID" 2>/dev/null || true
+
+      - name: Save session (final)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash "$RUNNER_TEMP/save_session.sh" || true
